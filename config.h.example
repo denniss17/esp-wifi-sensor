@@ -1,2 +1,11 @@
-const char* ssid     = "SSID";
-const char* password = "PASSWORD";
+// WiFi settings
+const char* ssid                = "SSID";
+const char* password            = "PASSWORD";
+
+// Sensor settings
+const bool enableLightSensor    = true;
+const bool enableHygrometer     = true;
+
+// Sensor calibration
+const float temperatureOffset   = 0.0;
+const float humidityOffset      = 0.0;

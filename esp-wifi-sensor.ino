@@ -11,36 +11,63 @@
 
 #define DHT_TYPE DHTesp::DHT22
 #define DHT_PIN 2                  // D4
+
+// Analog sensors are multiplexed, as there is only one analogue input pin.
 #define HYGROMETER_ENABLE_PIN 5    // D1
 #define PHOTORESISTOR_ENABLE_PIN 4 // D2
+
+#define JSON_MEDIATYPE "application/json"
 
 ESP8266WebServer server(80);
 DHTesp dht;
 
 float humidity, temperature, heatIndex;
 int brightness, moisture;
-String response = "";
-
-// The timestamp of the last time the sensor was read
-unsigned long previousMillis = 0;
-// Interval at which to read sensor
-const long interval = 2000;
+String response;
 
 void setup(void) {
-  // Begin serial output
+  response.reserve(128);
+  response = "";
+
+  setupSerial();
+  setupTemperatureSensor();
+  setupHygrometer();
+  setupLightSensor();
+
+  connectWifi();
+
+  startWebserver();
+}
+
+void setupSerial() {
   Serial.begin(9600);
-  Serial.println("\n\r \n\rWireless ESP8266 sensor");
 
-  // Initialize pins
-  pinMode(HYGROMETER_ENABLE_PIN, OUTPUT);
-  pinMode(PHOTORESISTOR_ENABLE_PIN, OUTPUT);
-  digitalWrite(HYGROMETER_ENABLE_PIN, LOW);
-  digitalWrite(PHOTORESISTOR_ENABLE_PIN, LOW);
+  // Print some information
+  Serial.println();
+  Serial.println("Wireless ESP8266 sensor");
+  Serial.println(enableLightSensor ? "Lightsensor  enabled"
+                                   : "Lightsensor  disabled");
+  Serial.println(enableHygrometer ? "Hygrometer   enabled"
+                                  : "Hygrometer   disabled");
+}
 
-  // Initialize temperature sensor
-  dht.setup(DHT_PIN, DHT_TYPE);
+void setupTemperatureSensor() { dht.setup(DHT_PIN, DHT_TYPE); }
 
-  // Connect to WiFi network
+void setupLightSensor() {
+  if (enableLightSensor) {
+    pinMode(PHOTORESISTOR_ENABLE_PIN, OUTPUT);
+    digitalWrite(PHOTORESISTOR_ENABLE_PIN, LOW);
+  }
+}
+
+void setupHygrometer() {
+  if (enableHygrometer) {
+    pinMode(HYGROMETER_ENABLE_PIN, OUTPUT);
+    digitalWrite(HYGROMETER_ENABLE_PIN, LOW);
+  }
+}
+
+void connectWifi() {
   WiFi.begin(ssid, password);
   Serial.print("Connecting to '");
   Serial.print(ssid);
@@ -54,35 +81,45 @@ void setup(void) {
   Serial.println("");
   Serial.print("Connected! IP address: ");
   Serial.println(WiFi.localIP());
+}
 
-  // Start web server
+void startWebserver() {
   server.on("/", handleRequest);
   server.begin();
   Serial.println("HTTP server started");
 }
 
 void handleRequest() {
-  // Read DHT
-  readDHTSensor();
-
-  // Read analog sensors, using multiplexing
-  readAnalogSensors();
+  readSensors();
 
   // Return the response
-  server.send(200, "application/json", createResponseAsJson());
+  server.send(200, JSON_MEDIATYPE, createResponseAsJson());
   delay(100);
 }
 
 String createResponseAsJson() {
   response = "{";
   if (!isnan(temperature)) {
-    response += ("\"temperature\": " + String(temperature, 1) + ", ");
+    response += ("\"temperature\":" + String(temperature, 1) + ",");
   }
   if (!isnan(humidity)) {
-    response += ("\"humidity\": " + String(humidity, 1) + ", ");
+    response += ("\"humidity\":" + String(humidity, 1) + ",");
   }
-  response += ("\"brightness\": " + String((brightness * 100) / 1024) + ", ");
-  response += ("\"moisture\": " + String(((1024 - moisture) * 100) / 1024));
+  if (!isnan(heatIndex)) {
+    response += ("\"heatIndex\":" + String(heatIndex, 1) + ",");
+  }
+  if (enableLightSensor) {
+    response += ("\"brightness\":" + String(brightness) + ",");
+  }
+  if (enableHygrometer) {
+    response += ("\"moisture\":" + String(moisture));
+  }
+
+  // If response now ends with a comma, remove the comma
+  if (response.endsWith(",")) {
+    response.remove(response.length() - 1);
+  }
+
   response += "}";
   return response;
 }
@@ -90,17 +127,9 @@ String createResponseAsJson() {
 void loop(void) { server.handleClient(); }
 
 void readDHTSensor() {
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
-
-    // Reading temperature for humidity takes about 250 milliseconds!
-    // Sensor readings may also be up to 2 seconds 'old' (it's a very slow
-    // sensor)
-    humidity = dht.getHumidity();
-    temperature = dht.getTemperature();
-    heatIndex = dht.computeHeatIndex(temperature, humidity, false); // false == celcius, true == fahrenheit
+    humidity = convertHumidity(dht.getHumidity());
+    temperature = convertTemperature(dht.getTemperature());
+    heatIndex = dht.computeHeatIndex(temperature, humidity, false); // false == celsius, true == fahrenheit
 
     if (isnan(humidity) || isnan(temperature)) {
       Serial.println("Failed to read from DHT sensor!");
@@ -108,8 +137,8 @@ void readDHTSensor() {
   }
 }
 
-void readAnalogSensors() {
-  // Analog sensors are multiplexed, as there is only one analogue input pin.
+void readSensors() {
+  readDHTSensor();
   readHygrometer();
   readPhotoresistor();
 }
@@ -117,13 +146,31 @@ void readAnalogSensors() {
 void readHygrometer() {
   digitalWrite(HYGROMETER_ENABLE_PIN, HIGH);
   delay(100); // Wait for high signal
-  moisture = analogRead(A0);
+  moisture = convertMoisture(analogRead(A0));
   digitalWrite(HYGROMETER_ENABLE_PIN, LOW);
 }
 
 void readPhotoresistor() {
   digitalWrite(PHOTORESISTOR_ENABLE_PIN, HIGH);
   delay(100); // Wait for high signal
-  brightness = analogRead(A0);
+  brightness = convertBrightness(analogRead(A0));
   digitalWrite(PHOTORESISTOR_ENABLE_PIN, LOW);
+}
+
+
+// Functions to convert the measurements to a more sane value or to calibrate the sensors.
+float convertTemperature(float temperature){
+  return temperature + temperatureOffset;
+}
+
+float convertHumidity(float humidity) {
+  return humidity + humidityOffset;
+}
+
+int convertBrightness(int brightness) {
+  return (brightness * 100) / 1024;
+}
+
+int convertMoisture(int moisture) {
+  return ((1024 - moisture) * 100) / 1024;
 }
