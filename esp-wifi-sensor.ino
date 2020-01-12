@@ -5,38 +5,36 @@
  */
 #include "config.h"
 #include <DHTesp.h>
-#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 
 #define DHT_TYPE DHTesp::DHT22
 #define DHT_PIN 2                  // D4
 
-// Analog sensors are multiplexed, as there is only one analogue input pin.
-#define HYGROMETER_ENABLE_PIN 5    // D1
-#define PHOTORESISTOR_ENABLE_PIN 4 // D2
-
+#define AUTHORIZATION_HEADER "Authorization"
+#define CONTENT_TYPE_HEADER "Content-Type"
 #define JSON_MEDIATYPE "application/json"
 
-ESP8266WebServer server(80);
 DHTesp dht;
 
 float humidity, temperature, heatIndex;
-int brightness, moisture;
-String response;
+String body;
 
 void setup(void) {
-  response.reserve(128);
-  response = "";
+  body.reserve(64);
+  body = "";
 
   setupSerial();
   setupTemperatureSensor();
-  setupHygrometer();
-  setupLightSensor();
-
   connectWifi();
 
-  startWebserver();
+  delay(500);
+
+  readDHTSensor();
+  sendData();
+
+  deepSleep();
 }
 
 void setupSerial() {
@@ -44,28 +42,10 @@ void setupSerial() {
 
   // Print some information
   Serial.println();
-  Serial.println("Wireless ESP8266 sensor");
-  Serial.println(enableLightSensor ? "Lightsensor  enabled"
-                                   : "Lightsensor  disabled");
-  Serial.println(enableHygrometer ? "Hygrometer   enabled"
-                                  : "Hygrometer   disabled");
+  Serial.println("Wireless low-energy ESP8266 sensor");
 }
 
 void setupTemperatureSensor() { dht.setup(DHT_PIN, DHT_TYPE); }
-
-void setupLightSensor() {
-  if (enableLightSensor) {
-    pinMode(PHOTORESISTOR_ENABLE_PIN, OUTPUT);
-    digitalWrite(PHOTORESISTOR_ENABLE_PIN, LOW);
-  }
-}
-
-void setupHygrometer() {
-  if (enableHygrometer) {
-    pinMode(HYGROMETER_ENABLE_PIN, OUTPUT);
-    digitalWrite(HYGROMETER_ENABLE_PIN, LOW);
-  }
-}
 
 void connectWifi() {
   WiFi.begin(ssid, password);
@@ -83,80 +63,57 @@ void connectWifi() {
   Serial.println(WiFi.localIP());
 }
 
-void startWebserver() {
-  server.on("/", handleRequest);
-  server.begin();
-  Serial.println("HTTP server started");
+void sendData() {
+  if(!isnan(temperature) && WiFi.status()== WL_CONNECTED){
+
+    WiFiClient client;
+    HTTPClient http;
+
+    Serial.print("[HTTP] begin...\n");
+    if (http.begin(client, homeassistantUrl)) {
+
+      http.addHeader(CONTENT_TYPE_HEADER, JSON_MEDIATYPE);
+      http.addHeader(AUTHORIZATION_HEADER, homeassistantToken);
+      body = "{\"state\":" + String(temperature, 1) + "}";
+
+      Serial.printf("[HTTP] POST url: %s\n            body: ", homeassistantUrl);
+      Serial.println(body);
+      int httpCode = http.POST(body);
+
+      // httpCode will be negative on error
+      if (httpCode > 0) {
+        // HTTP header has been send and Server response header has been handled
+        Serial.printf("[HTTP] POST code: %d\n", httpCode);
+
+        String payload = http.getString();  //Get the response payload
+        Serial.println(payload); //Print request response payload
+      } else {
+        Serial.printf("[HTTP] POST failed, error: %s\n", http.errorToString(httpCode).c_str());
+      }
+
+      http.end();
+    } else {
+      Serial.printf("[HTTP] Unable to connect\n");
+    }
+  } else {
+    Serial.println("Error in WiFi connection");
+  }
 }
-
-void handleRequest() {
-  readSensors();
-
-  // Return the response
-  server.send(200, JSON_MEDIATYPE, createResponseAsJson());
-  delay(100);
-}
-
-String createResponseAsJson() {
-  response = "{";
-  if (!isnan(temperature)) {
-    response += ("\"temperature\":" + String(temperature, 1) + ",");
-  }
-  if (!isnan(humidity)) {
-    response += ("\"humidity\":" + String(humidity, 1) + ",");
-  }
-  if (!isnan(heatIndex)) {
-    response += ("\"heatIndex\":" + String(heatIndex, 1) + ",");
-  }
-  if (enableLightSensor) {
-    response += ("\"brightness\":" + String(brightness) + ",");
-  }
-  if (enableHygrometer) {
-    response += ("\"moisture\":" + String(moisture));
-  }
-
-  // If response now ends with a comma, remove the comma
-  if (response.endsWith(",")) {
-    response.remove(response.length() - 1);
-  }
-
-  response += "}";
-  return response;
-}
-
-void loop(void) { server.handleClient(); }
 
 void readDHTSensor() {
-    humidity = convertHumidity(dht.getHumidity());
-    temperature = convertTemperature(dht.getTemperature());
-    heatIndex = dht.computeHeatIndex(temperature, humidity, false); // false == celsius, true == fahrenheit
+  humidity = convertHumidity(dht.getHumidity());
+  temperature = convertTemperature(dht.getTemperature());
+  heatIndex = dht.computeHeatIndex(temperature, humidity, false); // false == celsius, true == fahrenheit
 
-    if (isnan(humidity) || isnan(temperature)) {
-      Serial.println("Failed to read from DHT sensor!");
-    }
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read from DHT sensor!");
   }
 }
 
-void readSensors() {
-  readDHTSensor();
-  readHygrometer();
-  readPhotoresistor();
+void deepSleep() {
+  Serial.printf("Entering deepsleep for %d s\n", sleepTime/1000000);
+  ESP.deepSleep(sleepTime);
 }
-
-void readHygrometer() {
-  digitalWrite(HYGROMETER_ENABLE_PIN, HIGH);
-  delay(100); // Wait for high signal
-  moisture = convertMoisture(analogRead(A0));
-  digitalWrite(HYGROMETER_ENABLE_PIN, LOW);
-}
-
-void readPhotoresistor() {
-  digitalWrite(PHOTORESISTOR_ENABLE_PIN, HIGH);
-  delay(100); // Wait for high signal
-  brightness = convertBrightness(analogRead(A0));
-  digitalWrite(PHOTORESISTOR_ENABLE_PIN, LOW);
-}
-
 
 // Functions to convert the measurements to a more sane value or to calibrate the sensors.
 float convertTemperature(float temperature){
@@ -167,10 +124,6 @@ float convertHumidity(float humidity) {
   return humidity + humidityOffset;
 }
 
-int convertBrightness(int brightness) {
-  return (brightness * 100) / 1024;
-}
+void loop() {
 
-int convertMoisture(int moisture) {
-  return ((1024 - moisture) * 100) / 1024;
 }
